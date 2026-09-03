@@ -111,6 +111,15 @@
         .btn-high { background-color: #e94560; color: white; }
         .btn-low { background-color: #0f3460; color: white; }
         .btn-start { background-color: #ffb703; color: #1a1a2e; width: 100%; }
+        .btn-quit {
+            background-color: transparent;
+            color: #8d99ae;
+            border: 1px solid #8d99ae;
+            margin-top: 15px;
+            font-size: 0.85rem;
+            padding: 8px;
+            width: 100%;
+        }
         button:disabled { background-color: #2b2d42; color: #555; cursor: not-allowed; }
         input {
             padding: 10px;
@@ -167,6 +176,7 @@
             <button id="btn-low" class="btn-low" onclick="makeChoice('LOW')" disabled>LOW (低い)</button>
         </div>
         <button id="btn-next" class="btn-start hidden" onclick="startNextRound()">次のラウンドへ</button>
+        <button id="btn-quit" class="btn-quit" onclick="requestEndGame()">ゲームを終了する</button>
     </div>
 </div>
 
@@ -185,7 +195,8 @@
         hostScore: 0,
         guestScore: 0,
         turnRole: 'host', // 'host' or 'guest'
-        status: 'WAITING' // 'CHOOSING', 'RESULT', 'FINISHED'
+        status: 'WAITING', // 'CHOOSING', 'RESULT', 'FINISHED'
+        lastResult: ''
     };
 
     function createRoom() {
@@ -242,6 +253,8 @@
                 processChoice(data.choice);
             } else if (data.type === 'NEXT_ROUND' && isHost) {
                 startNextRound();
+            } else if (data.type === 'END_GAME') {
+                if (isHost) endGame();
             }
         });
 
@@ -294,25 +307,39 @@
     function processChoice(choice) {
         const curRank = gameState.currentCard.rank;
         const nextRank = gameState.nextCard.rank;
-        let isCorrect = false;
 
-        if (choice === 'HIGH' && nextRank > curRank) isCorrect = true;
-        if (choice === 'LOW' && nextRank < curRank) isCorrect = true;
-        if (nextRank === curRank) isCorrect = false; // 同点（ドロー）はハズレ扱い
-
-        if (isCorrect) {
+        if (nextRank === curRank) {
+            // 同じ数字（引き分け）
+            gameState.lastResult = 'DRAW';
+        } else if ((choice === 'HIGH' && nextRank > curRank) || (choice === 'LOW' && nextRank < curRank)) {
+            // 正解
             if (gameState.turnRole === 'host') gameState.hostScore += 100;
             else gameState.guestScore += 100;
             gameState.lastResult = 'WIN';
         } else {
+            // 不正解
             gameState.lastResult = 'LOSE';
         }
 
-        gameState.lastChoice = choice;
         gameState.status = 'RESULT';
         // ターン交代
         gameState.turnRole = (gameState.turnRole === 'host') ? 'guest' : 'host';
 
+        syncAndRender();
+    }
+
+    function requestEndGame() {
+        if (confirm('ゲームを途中で終了しますか？')) {
+            if (isHost) {
+                endGame();
+            } else {
+                conn.send({ type: 'END_GAME' });
+            }
+        }
+    }
+
+    function endGame() {
+        gameState.status = 'FINISHED';
         syncAndRender();
     }
 
@@ -326,10 +353,12 @@
     function renderUI() {
         const myRole = isHost ? 'host' : 'guest';
         const isMyTurn = (gameState.turnRole === myRole);
+        const myScore = isHost ? gameState.hostScore : gameState.guestScore;
+        const oppScore = isHost ? gameState.guestScore : gameState.hostScore;
 
         // スコア描画
-        document.getElementById('my-score').textContent = isHost ? gameState.hostScore : gameState.guestScore;
-        document.getElementById('opp-score').textContent = isHost ? gameState.guestScore : gameState.hostScore;
+        document.getElementById('my-score').textContent = myScore;
+        document.getElementById('opp-score').textContent = oppScore;
 
         // カード描画
         const curElem = document.getElementById('current-card');
@@ -339,7 +368,7 @@
         }
 
         const nextElem = document.getElementById('next-card');
-        if (gameState.status === 'RESULT' && gameState.nextCard) {
+        if ((gameState.status === 'RESULT' || gameState.status === 'FINISHED') && gameState.nextCard) {
             nextElem.className = 'card' + ((gameState.nextCard.suit === '♥' || gameState.nextCard.suit === '♦') ? ' red' : '');
             nextElem.textContent = `${gameState.nextCard.suit}${gameState.nextCard.value}`;
         } else {
@@ -352,16 +381,18 @@
         const btnHigh = document.getElementById('btn-high');
         const btnLow = document.getElementById('btn-low');
         const btnNext = document.getElementById('btn-next');
+        const btnQuit = document.getElementById('btn-quit');
         const controls = document.getElementById('game-controls');
 
         if (gameState.status === 'CHOOSING') {
             controls.classList.remove('hidden');
             btnNext.classList.add('hidden');
+            btnQuit.classList.remove('hidden');
 
             if (isMyTurn) {
                 badge.textContent = 'あなたの解答ターン';
                 badge.className = 'turn-badge my-turn';
-                document.getElementById('message').textContent = '次のカードは現在のカードより【高い】か【低い】か推測してください！';
+                document.getElementById('message').textContent = '次のカードは【高い】か【低い】か？';
                 btnHigh.disabled = false;
                 btnLow.disabled = false;
             } else {
@@ -376,10 +407,14 @@
             badge.className = 'turn-badge opp-turn';
             controls.classList.add('hidden');
             btnNext.classList.remove('hidden');
+            btnQuit.classList.remove('hidden');
 
-            const wasMyTurnLast = (gameState.turnRole !== myRole); // 処理後に交代しているため逆
+            const wasMyTurnLast = (gameState.turnRole !== myRole);
             let msg = '';
-            if (wasMyTurnLast) {
+            
+            if (gameState.lastResult === 'DRAW') {
+                msg = '【DRAW】同じ数字が出ました！ポイント変動なし！';
+            } else if (wasMyTurnLast) {
                 msg = (gameState.lastResult === 'WIN') ? '正解！ +100pt 獲得！' : '不正解…（残念！）';
             } else {
                 msg = (gameState.lastResult === 'WIN') ? '相手が正解しました（+100pt）' : '相手が不正解でした！';
@@ -390,6 +425,24 @@
                 if (isHost) startNextRound();
                 else conn.send({ type: 'NEXT_ROUND' });
             };
+        } else if (gameState.status === 'FINISHED') {
+            badge.textContent = 'ゲーム終了';
+            badge.className = 'turn-badge opp-turn';
+            controls.classList.add('hidden');
+            btnNext.classList.add('hidden');
+            btnQuit.classList.add('hidden');
+
+            let resultMsg = '';
+            if (myScore > oppScore) resultMsg = `🎉 あなたの勝ち！ (${myScore} vs ${oppScore})`;
+            else if (myScore < oppScore) resultMsg = `💀 あなたの負け… (${myScore} vs ${oppScore})`;
+            else resultMsg = `🤝 引き分け！ (${myScore} vs ${oppScore})`;
+
+            document.getElementById('message').textContent = resultMsg;
+            
+            // 3秒後にリロードしてロビーに戻る
+            setTimeout(() => {
+                location.reload();
+            }, 4000);
         }
     }
 </script>
